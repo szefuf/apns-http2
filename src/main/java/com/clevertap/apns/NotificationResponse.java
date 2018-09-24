@@ -30,6 +30,8 @@
 
 package com.clevertap.apns;
 
+import jdk.incubator.http.HttpResponse;
+
 /**
  * A wrapper around possible responses from the push gateway.
  */
@@ -44,6 +46,14 @@ public class NotificationResponse {
         this.httpStatusCode = httpStatusCode;
         this.responseBody = responseBody;
         this.cause = cause;
+    }
+
+    public static NotificationResponse fromResponse(HttpResponse<String> response) {
+        return new NotificationResponse(NotificationRequestError.get(response.statusCode()), response.statusCode(), response.body(), null);
+    }
+
+    public static NotificationResponse fromThrowable(Throwable throwable) {
+        return new NotificationResponse(null, -1, null, throwable);
     }
 
     /**

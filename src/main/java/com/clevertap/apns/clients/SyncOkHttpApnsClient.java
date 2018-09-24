@@ -33,16 +33,19 @@ package com.clevertap.apns.clients;
 import com.clevertap.apns.*;
 import com.clevertap.apns.internal.Constants;
 import com.clevertap.apns.internal.JWT;
-import okhttp3.*;
-import okio.BufferedSink;
+import jdk.incubator.http.HttpClient;
+import jdk.incubator.http.HttpRequest;
+import jdk.incubator.http.HttpResponse;
 
 import javax.net.ssl.*;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
 import java.security.*;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.security.spec.InvalidKeySpecException;
+import java.time.Duration;
 import java.util.UUID;
 
 /**
@@ -50,13 +53,15 @@ import java.util.UUID;
  */
 public class SyncOkHttpApnsClient implements ApnsClient {
 
+    private static final String MEDIA_TYPE = "application/json";
+
     private final String defaultTopic;
     private final String apnsAuthKey;
     private final String teamID;
     private final String keyID;
-    protected final OkHttpClient client;
     private final String gateway;
-    private static final MediaType mediaType = MediaType.parse("application/json");
+
+    protected final HttpClient client;
 
     private long lastJWTTokenTS = 0;
     private String cachedJWTToken = null;
@@ -72,7 +77,7 @@ public class SyncOkHttpApnsClient implements ApnsClient {
      * @param clientBuilder An OkHttp client builder, possibly pre-initialized, to build the actual client
      */
     public SyncOkHttpApnsClient(String apnsAuthKey, String teamID, String keyID, boolean production,
-                                String defaultTopic, OkHttpClient.Builder clientBuilder) {
+                                String defaultTopic, HttpClient.Builder clientBuilder) {
         this(apnsAuthKey, teamID, keyID, production, defaultTopic, clientBuilder, 443);
     }
 
@@ -88,15 +93,9 @@ public class SyncOkHttpApnsClient implements ApnsClient {
      * @param connectionPort The port to establish a connection with APNs. Either 443 or 2197
      */
     public SyncOkHttpApnsClient(String apnsAuthKey, String teamID, String keyID, boolean production,
-                                String defaultTopic, OkHttpClient.Builder clientBuilder, int connectionPort) {
-        this.apnsAuthKey = apnsAuthKey;
-        this.teamID = teamID;
-        this.keyID = keyID;
-        client = clientBuilder.build();
-
-        this.defaultTopic = defaultTopic;
-
-        gateway = (production ? Constants.ENDPOINT_PRODUCTION : Constants.ENDPOINT_SANDBOX) + ":" + connectionPort;
+                                String defaultTopic, HttpClient.Builder clientBuilder, int connectionPort) {
+        this (apnsAuthKey, teamID, keyID, production ? Constants.ENDPOINT_PRODUCTION : Constants.ENDPOINT_SANDBOX,
+                defaultTopic,clientBuilder, connectionPort);
     }
 
     /**
@@ -105,14 +104,21 @@ public class SyncOkHttpApnsClient implements ApnsClient {
      * @param apnsAuthKey    The private key - exclude -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY-----
      * @param teamID         The team ID
      * @param keyID          The key ID (retrieved from the file name)
-     * @param production     Whether to use the production endpoint or the sandbox endpoint
+     * @param gateway        Endpoint address
      * @param defaultTopic   A default topic (can be changed per message)
-     * @param connectionPool A connection pool to use. If null, a new one will be generated
+     * @param clientBuilder  An OkHttp client builder, possibly pre-initialized, to build the actual client
+     * @param connectionPort The port to establish a connection with APNs. Either 443 or 2197
      */
-    public SyncOkHttpApnsClient(String apnsAuthKey, String teamID, String keyID, boolean production,
-                                String defaultTopic, ConnectionPool connectionPool) {
+    public SyncOkHttpApnsClient(String apnsAuthKey, String teamID, String keyID, String gateway,
+                                String defaultTopic, HttpClient.Builder clientBuilder, int connectionPort) {
+        this.apnsAuthKey = apnsAuthKey;
+        this.teamID = teamID;
+        this.keyID = keyID;
+        client = clientBuilder.build();
 
-        this(apnsAuthKey, teamID, keyID, production, defaultTopic, getBuilder(connectionPool));
+        this.defaultTopic = defaultTopic;
+
+        this.gateway = gateway + ":" + connectionPort;
     }
 
     /**
@@ -133,7 +139,7 @@ public class SyncOkHttpApnsClient implements ApnsClient {
      * @throws KeyStoreException         if no Provider supports a KeyStoreSpi implementation for the specified type
      */
     public SyncOkHttpApnsClient(InputStream certificate, String password, boolean production,
-                                String defaultTopic, OkHttpClient.Builder builder)
+                                String defaultTopic, HttpClient.Builder builder)
             throws CertificateException, NoSuchAlgorithmException, KeyStoreException,
             IOException, UnrecoverableKeyException, KeyManagementException {
         this(certificate, password, production, defaultTopic, builder, 443);
@@ -158,10 +164,9 @@ public class SyncOkHttpApnsClient implements ApnsClient {
      * @throws KeyStoreException         if no Provider supports a KeyStoreSpi implementation for the specified type
      */
     public SyncOkHttpApnsClient(InputStream certificate, String password, boolean production,
-                                String defaultTopic, OkHttpClient.Builder builder, int connectionPort)
+                                String defaultTopic, HttpClient.Builder builder, int connectionPort)
             throws CertificateException, NoSuchAlgorithmException, KeyStoreException,
             IOException, UnrecoverableKeyException, KeyManagementException {
-
         teamID = keyID = apnsAuthKey = null;
 
         password = password == null ? "" : password;
@@ -180,9 +185,10 @@ public class SyncOkHttpApnsClient implements ApnsClient {
         tmf.init((KeyStore) null);
         sslContext.init(keyManagers, tmf.getTrustManagers(), null);
 
-        final SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
+        //TODO: delete
+//        SSLContext sslContext2 = SSLContext.getInstance(toString(tmf.getTrustManagers()));
 
-        builder.sslSocketFactory(sslSocketFactory);
+        builder.sslContext(sslContext);
 
         client = builder.build();
 
@@ -190,47 +196,14 @@ public class SyncOkHttpApnsClient implements ApnsClient {
         gateway = (production ? Constants.ENDPOINT_PRODUCTION : Constants.ENDPOINT_SANDBOX) + ":" + connectionPort;
     }
 
-    /**
-     * Creates a new client and automatically loads the key store
-     * with the push certificate read from the input stream.
-     *
-     * @param certificate    The client certificate to be used
-     * @param password       The password (if required, else null)
-     * @param production     Whether to use the production endpoint or the sandbox endpoint
-     * @param defaultTopic   A default topic (can be changed per message)
-     * @param connectionPool A connection pool to use. If null, a new one will be generated
-     * @throws UnrecoverableKeyException If the key cannot be recovered
-     * @throws KeyManagementException    if the key failed to be loaded
-     * @throws CertificateException      if any of the certificates in the keystore could not be loaded
-     * @throws NoSuchAlgorithmException  if the algorithm used to check the integrity of the keystore cannot be found
-     * @throws IOException               if there is an I/O or format problem with the keystore data,
-     *                                   if a password is required but not given, or if the given password was incorrect
-     * @throws KeyStoreException         if no Provider supports a KeyStoreSpi implementation for the specified type
-     */
-    public SyncOkHttpApnsClient(InputStream certificate, String password, boolean production,
-                                String defaultTopic, ConnectionPool connectionPool)
-            throws CertificateException, NoSuchAlgorithmException, KeyStoreException,
-            IOException, UnrecoverableKeyException, KeyManagementException {
-
-        this(certificate, password, production, defaultTopic, getBuilder(connectionPool));
-    }
-
-    /**
-     * Creates a default builder that can be customized later and then passed to one of
-     * the constructors taking a builder instance. The constructors that don't take
-     * builders themselves use this method internally to create their client builders.
-     *
-     * @param connectionPool A connection pool to use. If null, a new one will be generated
-     * @return a new OkHttp client builder, intialized with default settings.
-     */
-    private static OkHttpClient.Builder getBuilder(ConnectionPool connectionPool) {
-        OkHttpClient.Builder builder = ApnsClientBuilder.createDefaultOkHttpClientBuilder();
-        if (connectionPool != null) {
-            builder.connectionPool(connectionPool);
-        }
-
-        return builder;
-    }
+    //TODO: delete
+//    private String toString(TrustManager[] trustManagers) {
+//        StringBuffer sb = new StringBuffer();
+//        for (TrustManager tm : trustManagers) {
+//            sb.append(tm.toString()).append(", ");
+//        }
+//        return sb.toString();
+//    }
 
     @Override
     public boolean isSynchronous() {
@@ -242,26 +215,17 @@ public class SyncOkHttpApnsClient implements ApnsClient {
         throw new UnsupportedOperationException("Asynchronous requests are not supported by this client");
     }
 
-    protected final Request buildRequest(Notification notification) {
+    protected final HttpRequest buildRequest(Notification notification) {
         final String topic = notification.getTopic() != null ? notification.getTopic() : defaultTopic;
         final String collapseId = notification.getCollapseId();
         final UUID uuid = notification.getUuid();
         final long expiration = notification.getExpiration();
         final Notification.Priority priority = notification.getPriority();
-        Request.Builder rb = new Request.Builder()
-                .url(gateway + "/3/device/" + notification.getToken())
-                .post(new RequestBody() {
-                    @Override
-                    public MediaType contentType() {
-                        return mediaType;
-                    }
-
-                    @Override
-                    public void writeTo(BufferedSink sink) throws IOException {
-                        sink.write(notification.getPayload().getBytes(Constants.UTF_8));
-                    }
-                })
-                .header("content-length", notification.getPayload().getBytes(Constants.UTF_8).length + "");
+        HttpRequest.Builder rb = HttpRequest.newBuilder()
+                .uri(URI.create(gateway + "/3/device/" + notification.getToken()))
+                .header("Content-Type", MEDIA_TYPE)
+                .timeout(Duration.ofMinutes(1))
+                .POST(HttpRequest.BodyPublisher.fromByteArray(notification.getPayload().getBytes(Constants.UTF_8)));
 
         if (topic != null) {
             rb.header("apns-topic", topic);
@@ -303,36 +267,33 @@ public class SyncOkHttpApnsClient implements ApnsClient {
 
 
     @Override
-    public NotificationResponse push(Notification notification) {
-        final Request request = buildRequest(notification);
-        Response response = null;
-
-        try {
-            response = client.newCall(request).execute();
-            return parseResponse(response);
-        } catch (Throwable t) {
-            return new NotificationResponse(null, -1, null, t);
-        } finally {
-            if (response != null) {
-                response.body().close();
-            }
-        }
-    }
-
-    @Override
-    public OkHttpClient getHttpClient() {
+    public HttpClient getHttpClient() {
         return client;
     }
 
-    protected NotificationResponse parseResponse(Response response) throws IOException {
+
+    @Override
+    public NotificationResponse push(Notification notification) {
+        final HttpRequest request = buildRequest(notification);
+        HttpResponse response = null;
+
+        try {
+            response = client.send(request, HttpResponse.BodyHandler.asString());
+            return parseResponse(response);
+        } catch (Throwable t) {
+            return new NotificationResponse(null, -1, null, t);
+        }
+    }
+
+    protected NotificationResponse parseResponse(HttpResponse response) throws IOException {
         String contentBody = null;
-        int statusCode = response.code();
+        int statusCode = response.statusCode();
 
         NotificationRequestError error = null;
 
-        if (response.code() != 200) {
+        if (statusCode != 200) {
             error = NotificationRequestError.get(statusCode);
-            contentBody = response.body() != null ? response.body().string() : null;
+            contentBody = response.body() != null ? response.body().toString() : null;
         }
 
         return new NotificationResponse(error, statusCode, contentBody, null);

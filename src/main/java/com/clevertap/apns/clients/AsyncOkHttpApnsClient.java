@@ -33,7 +33,9 @@ package com.clevertap.apns.clients;
 import com.clevertap.apns.Notification;
 import com.clevertap.apns.NotificationResponse;
 import com.clevertap.apns.NotificationResponseListener;
-import okhttp3.*;
+import jdk.incubator.http.HttpClient;
+import jdk.incubator.http.HttpRequest;
+import jdk.incubator.http.HttpResponse;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -48,37 +50,27 @@ import java.security.cert.CertificateException;
  */
 public class AsyncOkHttpApnsClient extends SyncOkHttpApnsClient {
 
-    public AsyncOkHttpApnsClient(String apnsAuthKey, String teamID, String keyID,
-                                 boolean production, String defaultTopic, ConnectionPool connectionPool) {
-        super(apnsAuthKey, teamID, keyID, production, defaultTopic, connectionPool);
-    }
-
-    public AsyncOkHttpApnsClient(InputStream certificate, String password, boolean production,
-                                 String defaultTopic, ConnectionPool connectionPool)
-            throws CertificateException, NoSuchAlgorithmException, KeyStoreException,
-            IOException, UnrecoverableKeyException, KeyManagementException {
-        super(certificate, password, production, defaultTopic, connectionPool);
-    }
+//    private static final Logger LOG = LoggerFactory.getLogger(AsyncOkHttpApnsClient.class);
 
     public AsyncOkHttpApnsClient(String apnsAuthKey, String teamID, String keyID,
-                                 boolean production, String defaultTopic, OkHttpClient.Builder builder) {
+                                 boolean production, String defaultTopic, HttpClient.Builder builder) {
         this(apnsAuthKey, teamID, keyID, production, defaultTopic, builder, 443);
     }
 
     public AsyncOkHttpApnsClient(String apnsAuthKey, String teamID, String keyID,
-                                 boolean production, String defaultTopic, OkHttpClient.Builder builder, int connectionPort) {
+                                 boolean production, String defaultTopic, HttpClient.Builder builder, int connectionPort) {
         super(apnsAuthKey, teamID, keyID, production, defaultTopic, builder);
     }
 
     public AsyncOkHttpApnsClient(InputStream certificate, String password, boolean production,
-                                 String defaultTopic, OkHttpClient.Builder builder)
+                                 String defaultTopic, HttpClient.Builder builder)
             throws CertificateException, NoSuchAlgorithmException, KeyStoreException,
             IOException, UnrecoverableKeyException, KeyManagementException {
         this(certificate, password, production, defaultTopic, builder, 443);
     }
 
     public AsyncOkHttpApnsClient(InputStream certificate, String password, boolean production,
-                                 String defaultTopic, OkHttpClient.Builder builder, int connectionPort)
+                                 String defaultTopic, HttpClient.Builder builder, int connectionPort)
             throws CertificateException, NoSuchAlgorithmException, KeyStoreException,
             IOException, UnrecoverableKeyException, KeyManagementException {
         super(certificate, password, production, defaultTopic, builder);
@@ -96,36 +88,20 @@ public class AsyncOkHttpApnsClient extends SyncOkHttpApnsClient {
 
     @Override
     public void push(Notification notification, NotificationResponseListener nrl) {
-        final Request request = buildRequest(notification);
+        final HttpRequest request = buildRequest(notification);
 
-        client.newCall(request).enqueue(new Callback() {
-            @Override
-            public void onFailure(Call call, IOException e) {
-                nrl.onFailure(notification, new NotificationResponse(null, -1, null, e));
-            }
+        client.sendAsync(request, HttpResponse.BodyHandler.asString())
+                    .handle((response, throwable) -> handle(nrl, notification, response, throwable));
+    }
 
-            @Override
-            public void onResponse(Call call, Response response) throws IOException {
-                final NotificationResponse nr;
-
-                try {
-                    nr = parseResponse(response);
-                } catch (Throwable t) {
-                    nrl.onFailure(notification, new NotificationResponse(null, -1, null, t));
-                    return;
-                } finally {
-                    if (response != null) {
-                        response.body().close();
-                    }
-                }
-
-                if (nr.getHttpStatusCode() == 200) {
-                    nrl.onSuccess(notification);
-                } else {
-                    nrl.onFailure(notification, nr);
-                }
-            }
-        });
-
+    private Void handle(NotificationResponseListener nrl, Notification notification, HttpResponse<String> response, Throwable throwable) {
+        if (throwable!=null) {
+            nrl.onFailure(notification, NotificationResponse.fromThrowable(throwable));
+        } else if (!String.valueOf(response.statusCode()).startsWith("2")) {
+            nrl.onFailure(notification, NotificationResponse.fromResponse(response));
+        } else {
+            nrl.onSuccess(notification);
+        }
+        return null;
     }
 }
